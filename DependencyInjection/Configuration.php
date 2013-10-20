@@ -324,6 +324,7 @@ class Configuration implements ConfigurationInterface
     {
         $node
             ->scalarNode('type')->defaultValue('string')->end()
+            ->scalarNode('format')->end()
             ->scalarNode('boost')->end()
             ->scalarNode('store')->end()
             ->scalarNode('index')->end()
