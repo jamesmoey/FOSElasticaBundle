@@ -5,9 +5,6 @@ namespace FOS\ElasticaBundle\Paginator;
 use Elastica\SearchableInterface;
 use Elastica\Query;
 use Elastica\ResultSet;
-use FOS\ElasticaBundle\Paginator\PaginatorAdapterInterface;
-use FOS\ElasticaBundle\Paginator\RawPartialResults;
-use FOS\ElasticaBundle\Paginator\PartialResultsInterface;
 use InvalidArgumentException;
 
 /**
@@ -26,12 +23,17 @@ class RawPaginatorAdapter implements PaginatorAdapterInterface
     private $query;
 
     /**
+     * @var array search options
+     */
+    private $options;
+
+    /**
      * @var integer the number of hits
      */
     private $totalHits;
 
     /**
-     * @array for the facets
+     * @var array for the facets
      */
     private $facets;
 
@@ -41,10 +43,11 @@ class RawPaginatorAdapter implements PaginatorAdapterInterface
      * @param SearchableInterface $searchable the object to search in
      * @param Query $query the query to search
      */
-    public function __construct(SearchableInterface $searchable, Query $query)
+    public function __construct(SearchableInterface $searchable, Query $query, array $options = array())
     {
         $this->searchable = $searchable;
         $this->query      = $query;
+        $this->options    = $options;
     }
 
     /**
@@ -52,6 +55,7 @@ class RawPaginatorAdapter implements PaginatorAdapterInterface
      *
      * @param $offset
      * @param $itemCountPerPage
+     * @throws \InvalidArgumentException
      * @return ResultSet
      */
     protected function getElasticaResults($offset, $itemCountPerPage)
@@ -74,7 +78,7 @@ class RawPaginatorAdapter implements PaginatorAdapterInterface
         $query->setFrom($offset);
         $query->setSize($itemCountPerPage);
 
-        $resultSet = $this->searchable->search($query);
+        $resultSet = $this->searchable->search($query, $this->options);
         $this->totalHits = $resultSet->getTotalHits();
         $this->facets = $resultSet->getFacets();
         return $resultSet;

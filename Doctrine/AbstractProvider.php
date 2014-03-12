@@ -3,6 +3,7 @@
 namespace FOS\ElasticaBundle\Doctrine;
 
 use Doctrine\Common\Persistence\ManagerRegistry;
+use Elastica\Exception\Bulk\ResponseException as BulkResponseException;
 use FOS\ElasticaBundle\Persister\ObjectPersisterInterface;
 use FOS\ElasticaBundle\Provider\AbstractProvider as BaseAbstractProvider;
 
@@ -22,6 +23,7 @@ abstract class AbstractProvider extends BaseAbstractProvider
     {
         parent::__construct($objectPersister, $objectClass, array_merge(array(
             'clear_object_manager' => true,
+            'ignore_errors'        => false,
             'query_builder_method' => 'createQueryBuilder',
         ), $options));
 
@@ -31,29 +33,45 @@ abstract class AbstractProvider extends BaseAbstractProvider
     /**
      * @see FOS\ElasticaBundle\Provider\ProviderInterface::populate()
      */
-    public function populate(\Closure $loggerClosure = null)
+    public function populate(\Closure $loggerClosure = null, array $options = array())
     {
         $queryBuilder = $this->createQueryBuilder();
         $nbObjects = $this->countObjects($queryBuilder);
+        $offset = isset($options['offset']) ? intval($options['offset']) : 0;
+        $sleep = isset($options['sleep']) ? intval($options['sleep']) : 0;
+        $batchSize = isset($options['batch-size']) ? intval($options['batch-size']) : $this->options['batch_size'];
+        $ignoreErrors = isset($options['ignore-errors']) ? $options['ignore-errors'] : $this->options['ignore_errors'];
 
-        for ($offset = 0; $offset < $nbObjects; $offset += $this->options['batch_size']) {
+        for (; $offset < $nbObjects; $offset += $batchSize) {
             if ($loggerClosure) {
                 $stepStartTime = microtime(true);
             }
-            $objects = $this->fetchSlice($queryBuilder, $this->options['batch_size'], $offset);
+            $objects = $this->fetchSlice($queryBuilder, $batchSize, $offset);
 
-            $this->objectPersister->insertMany($objects);
+            if (!$ignoreErrors) {
+                $this->objectPersister->insertMany($objects);
+            } else {
+                try {
+                    $this->objectPersister->insertMany($objects);
+                } catch(BulkResponseException $e) {
+                    if ($loggerClosure) {
+                        $loggerClosure(sprintf('<error>%s</error>',$e->getMessage()));
+                    }
+                }
+            }
 
             if ($this->options['clear_object_manager']) {
                 $this->managerRegistry->getManagerForClass($this->objectClass)->clear();
             }
+
+            usleep($sleep);
 
             if ($loggerClosure) {
                 $stepNbObjects = count($objects);
                 $stepCount = $stepNbObjects + $offset;
                 $percentComplete = 100 * $stepCount / $nbObjects;
                 $objectsPerSecond = $stepNbObjects / (microtime(true) - $stepStartTime);
-                $loggerClosure(sprintf('%0.1f%% (%d/%d), %d objects/s', $percentComplete, $stepCount, $nbObjects, $objectsPerSecond));
+                $loggerClosure(sprintf('%0.1f%% (%d/%d), %d objects/s %s', $percentComplete, $stepCount, $nbObjects, $objectsPerSecond, $this->getMemoryUsage()));
             }
         }
     }

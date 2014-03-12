@@ -76,8 +76,9 @@ class Configuration implements ConfigurationInterface
                                 return array(
                                     'servers' => array(
                                         array(
-                                            'host' => $v['host'],
-                                            'port' => $v['port'],
+                                            'host'   => $v['host'],
+                                            'port'   => $v['port'],
+                                            'logger' => isset($v['logger']) ? $v['logger'] : null
                                         )
                                     )
                                 );
@@ -89,7 +90,8 @@ class Configuration implements ConfigurationInterface
                                 return array(
                                     'servers' => array(
                                         array(
-                                            'url' => $v['url'],
+                                            'url'    => $v['url'],
+                                            'logger' => isset($v['logger']) ? $v['logger'] : null
                                         )
                                     )
                                 );
@@ -99,9 +101,20 @@ class Configuration implements ConfigurationInterface
                             ->arrayNode('servers')
                                 ->prototype('array')
                                     ->children()
-                                        ->scalarNode('url')->end()
+                                        ->scalarNode('url')
+                                            ->validate()
+                                                ->ifTrue(function($url) { return substr($url, -1) !== '/'; })
+                                                ->then(function($url) { return $url.'/'; })
+                                            ->end()
+                                        ->end()
                                         ->scalarNode('host')->end()
                                         ->scalarNode('port')->end()
+                                        ->scalarNode('logger')
+                                            ->defaultValue('fos_elastica.logger')
+                                            ->treatNullLike('fos_elastica.logger')
+                                            ->treatTrueLike('fos_elastica.logger')
+                                        ->end()
+                                        ->scalarNode('timeout')->end()
                                     ->end()
                                 ->end()
                             ->end()
@@ -125,7 +138,6 @@ class Configuration implements ConfigurationInterface
                 ->arrayNode('indexes')
                     ->useAttributeAsKey('name')
                     ->prototype('array')
-                        ->performNoDeepMerging()
                         ->children()
                             ->scalarNode('index_name')->end()
                             ->scalarNode('client')->end()
@@ -179,6 +191,7 @@ class Configuration implements ConfigurationInterface
                                                 ->children()
                                                     ->scalarNode('hydrate')->defaultTrue()->end()
                                                     ->scalarNode('ignore_missing')->defaultFalse()->end()
+                                                    ->scalarNode('query_builder_method')->defaultValue('createQueryBuilder')->end()
                                                     ->scalarNode('service')->end()
                                                 ->end()
                                             ->end()
@@ -270,6 +283,7 @@ class Configuration implements ConfigurationInterface
                                 ->children()
                                     ->scalarNode('hydrate')->defaultTrue()->end()
                                     ->scalarNode('ignore_missing')->defaultFalse()->end()
+                                    ->scalarNode('query_builder_method')->defaultValue('createQueryBuilder')->end()
                                     ->scalarNode('service')->end()
                                 ->end()
                             ->end()
@@ -284,10 +298,14 @@ class Configuration implements ConfigurationInterface
                 ->end()
                 ->append($this->getIdNode())
                 ->append($this->getMappingsNode())
+                ->append($this->getDynamicTemplateNode())
                 ->append($this->getSourceNode())
                 ->append($this->getBoostNode())
                 ->append($this->getRoutingNode())
                 ->append($this->getParentNode())
+                ->append($this->getAllNode())
+                ->append($this->getTimestampNode())
+                ->append($this->getTtlNode())
             ->end()
         ;
 
@@ -317,6 +335,47 @@ class Configuration implements ConfigurationInterface
     }
 
     /**
+     * Returns the array node used for "dynamic_templates".
+     */
+    public function getDynamicTemplateNode()
+    {
+        $builder = new TreeBuilder();
+        $node = $builder->root('dynamic_templates');
+
+        $node
+            ->useAttributeAsKey('name')
+            ->prototype('array')
+                ->children()
+                    ->scalarNode('match')->end()
+                    ->scalarNode('unmatch')->end()
+                    ->scalarNode('match_mapping_type')->end()
+                    ->scalarNode('path_match')->end()
+                    ->scalarNode('path_unmatch')->end()
+                    ->scalarNode('match_pattern')->end()
+                    ->append($this->getDynamicTemplateMapping())
+                ->end()
+            ->end()
+        ;
+
+        return $node;
+    }
+
+    /**
+     * @return the array node used for mapping in dynamic templates
+     */
+    protected function getDynamicTemplateMapping()
+    {
+        $builder = new TreeBuilder();
+        $node = $builder->root('mapping');
+
+        $nestings = $this->getNestingsForDynamicTemplates();
+
+        $this->addFieldConfig($node->children(), $nestings);
+
+        return $node;
+    }
+
+    /**
      * @param \Symfony\Component\Config\Definition\Builder\NodeBuilder $node The node to which to attach the field config to
      * @param array $nestings the nested mappings for the current field level
      */
@@ -334,12 +393,22 @@ class Configuration implements ConfigurationInterface
             ->scalarNode('term_vector')->end()
             ->scalarNode('null_value')->end()
             ->booleanNode('include_in_all')->defaultValue(true)->end()
+            ->booleanNode('enabled')->defaultValue(true)->end()
             ->scalarNode('lat_lon')->end()
             ->scalarNode('index_name')->end()
             ->booleanNode('omit_norms')->end()
             ->scalarNode('index_options')->end()
             ->scalarNode('ignore_above')->end()
             ->scalarNode('position_offset_gap')->end()
+            ->arrayNode('_parent')
+                ->treatNullLike(array())
+                ->children()
+                    ->scalarNode('type')->end()
+                    ->scalarNode('identifier')->defaultValue('id')->end()
+                ->end()
+            ->end()
+            ->scalarNode('format')->end()
+            ->scalarNode('similarity')->end();
         ;
 
         if (isset($nestings['fields'])) {
@@ -391,7 +460,46 @@ class Configuration implements ConfigurationInterface
             }
 
             foreach ($index['types'] as $type) {
+                if (empty($type['mappings'])) {
+                    continue;
+                }
+
                 $nestings = array_merge_recursive($nestings, $this->getNestingsForType($type['mappings'], $nestings));
+            }
+        }
+        return $nestings;
+    }
+
+    /**
+     * @return array The unique nested mappings for all dynamic templates
+     */
+    protected function getNestingsForDynamicTemplates()
+    {
+        if (!isset($this->configArray[0]['indexes'])) {
+            return array();
+        }
+
+        $nestings = array();
+        foreach ($this->configArray[0]['indexes'] as $index) {
+            if (empty($index['types'])) {
+                continue;
+            }
+
+            foreach ($index['types'] as $type) {
+                if (empty($type['dynamic_templates'])) {
+                    continue;
+                }
+
+                foreach ($type['dynamic_templates'] as $definition) {
+                    $field = $definition['mapping'];
+
+                    if (isset($field['fields'])) {
+                        $this->addPropertyNesting($field, $nestings, 'fields');
+                    } else if (isset($field['properties'])) {
+                        $this->addPropertyNesting($field, $nestings, 'properties');
+                    }
+                }
+
             }
         }
         return $nestings;
@@ -526,6 +634,64 @@ class Configuration implements ConfigurationInterface
                 ->scalarNode('type')->end()
                 ->scalarNode('property')->defaultValue(null)->end()
                 ->scalarNode('identifier')->defaultValue('id')->end()
+            ->end()
+        ;
+
+        return $node;
+    }
+
+    /**
+     * Returns the array node used for "_all"
+     */
+    protected function getAllNode()
+    {
+        $builder = new TreeBuilder();
+        $node = $builder->root('_all');
+
+        $node
+            ->children()
+            ->scalarNode('enabled')->defaultValue(true)->end()
+            ->end()
+        ;
+
+        return $node;
+    }
+
+    /**
+     * Returns the array node used for "_timestamp"
+     */
+    protected function getTimestampNode()
+    {
+        $builder = new TreeBuilder();
+        $node = $builder->root('_timestamp');
+
+        $node
+            ->children()
+            ->scalarNode('enabled')->defaultValue(true)->end()
+            ->scalarNode('path')->end()
+            ->scalarNode('format')->end()
+            ->scalarNode('store')->end()
+            ->scalarNode('index')->end()
+            ->end()
+        ;
+
+        return $node;
+    }
+
+    /**
+     * Returns the array node used for "_ttl"
+     */
+    protected function getTtlNode()
+    {
+        $builder = new TreeBuilder();
+        $node = $builder->root('_ttl');
+
+        $node
+            ->children()
+            ->scalarNode('enabled')->defaultValue(true)->end()
+            ->scalarNode('default')->end()
+            ->scalarNode('store')->end()
+            ->scalarNode('index')->end()
             ->end()
         ;
 

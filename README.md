@@ -102,9 +102,9 @@ Here we created a "website" index, that uses our "default" client.
 
 Our index is now available as a service: `fos_elastica.index.website`. It is an instance of `\Elastica\Index`.
 
-If you need to have different index name from the service name, for example, 
-in order to have different indexes for different environments then you can 
-use the ```index_name``` key to change the index name. The service name will 
+If you need to have different index name from the service name, for example,
+in order to have different indexes for different environments then you can
+use the ```index_name``` key to change the index name. The service name will
 remain the same across the environments:
 
     fos_elastica:
@@ -114,8 +114,8 @@ remain the same across the environments:
             website:
                 client: default
                 index_name: website_qa
-                
-The service id will be `fos_elastica.index.website` but the underlying index name is website_qa.           
+
+The service id will be `fos_elastica.index.website` but the underlying index name is website_qa.
 
 #### Declare a type
 
@@ -182,16 +182,18 @@ per type.
                             content: ~
                         _parent: { type: "post", property: "post", identifier: "id" }
 
-The parent filed declaration has the following values:
+The parent field declaration has the following values:
 
  * `type`: The parent type.
  * `property`: The property in the child entity where to look for the parent entity. It may be ignored if is equal to the parent type.
- * `identifier`: The property in the parent entity which have the parent identifier. Defaults to `id`.
+ * `identifier`: The property in the parent entity which has the parent identifier. Defaults to `id`.
 
 Note that to create a document with a parent, you need to call `setParent` on the document rather than setting a _parent field.
 If you do this wrong, you will see a `RoutingMissingException` as elasticsearch does not know where to store a document that should have a parent but does not specify it.
 
 ### Declaring `nested` or `object`
+
+Note that object can autodetect properties
 
     fos_elastica:
         clients:
@@ -213,6 +215,12 @@ If you do this wrong, you will see a `RoutingMissingException` as elasticsearch 
                                 properties:
                                     date: { boost: 5 }
                                     content: ~
+                            user:
+                                type: "object"
+                            approver:
+                                type: "object"
+                                properties:
+                                    date: { boost: 5 }
 
 #### Doctrine ORM and `object` mappings
 
@@ -230,7 +238,7 @@ It applies the configured mappings to the types.
 This command needs providers to insert new documents in the elasticsearch types.
 There are 2 ways to create providers.
 If your elasticsearch type matches a Doctrine repository or a Propel query, go for the persistence automatic provider.
-Or, for complete flexibility, go for manual provider.
+Or, for complete flexibility, go for a manual provider.
 
 #### Persistence automatic provider
 
@@ -327,8 +335,9 @@ Its class must implement `FOS\ElasticaBundle\Provider\ProviderInterface`.
              * Insert the repository objects in the type index
              *
              * @param \Closure $loggerClosure
+             * @param array    $options
              */
-            public function populate(\Closure $loggerClosure = null)
+            public function populate(\Closure $loggerClosure = null, array $options = array())
             {
                 if ($loggerClosure) {
                     $loggerClosure('Indexing users');
@@ -494,7 +503,7 @@ If you use multiple drivers then you can choose which one is aliased to `fos_ela
 using the `default_manager` parameter:
 
     fos_elastica:
-        default_manager: mongodb #defauults to orm
+        default_manager: mongodb #defaults to orm
         clients:
             default: { host: localhost, port: 9200 }
         #--
@@ -517,7 +526,7 @@ class UserRepository extends Repository
     public function findWithCustomQuery($searchText)
     {
         // build $query with Elastica objects
-        $this->find($query);
+        return $this->find($query);
     }
 }
 ```
@@ -591,7 +600,7 @@ Declare that you want to update the index in real time:
                         persistence:
                             driver: orm
                             model: Application\UserBundle\Entity\User
-                            listener: # by default, listens to "insert", "update" and "delete"
+                            listener: ~ # by default, listens to "insert", "update" and "delete"
 
 Now the index is automatically updated each time the state of the bound Doctrine repository changes.
 No need to repopulate the whole "user" index when a new `User` is created.
@@ -628,6 +637,13 @@ returns `true`. Additionally, you may provide a service and method name pair:
 In this case, the callback_class will be the `isIndexable()` method on the specified
 service and the object being considered for indexing will be passed as the only
 argument. This allows you to do more complex validation (e.g. ACL checks).
+
+If you have the [Symfony ExpressionLanguage](https://github.com/symfony/expression-language) component installed, you can use expressions
+to evaluate the callback:
+
+                        persistence:
+                            listener:
+                                is_indexable_callback: "user.isActive() && user.hasRole('ROLE_USER')"
 
 As you might expect, new entities will only be indexed if the callback_class returns
 `true`. Additionally, modified entities will be updated or removed from the
@@ -795,4 +811,52 @@ $term = new \Elastica\Filter\Term(array('active' => true));
 
 $filteredQuery = new \Elastica\Query\Filtered($query, $term);
 $results = $this->container->get('fos_elastica.finder.index.type')->find($filteredQuery);
+```
+
+### Date format example
+
+If you want to specify a [date format](http://www.elasticsearch.org/guide/en/elasticsearch/reference/current/mapping-date-format.html):
+
+```yaml
+fos_elastica:
+    clients:
+        default: { host: localhost, port: 9200 }
+    indexes:
+        site:
+            types:
+                user:
+                    mappings:
+                        username: { type: string }
+                        lastlogin: { type: date, format: basic_date_time }
+                        birthday: { type: date, format: "yyyy-MM-dd" }
+```
+
+#### Dynamic templates
+
+Dynamic templates allow to define mapping templates that will be
+applied when dynamic introduction of fields / objects happens.
+
+[Documentation](http://www.elasticsearch.org/guide/en/elasticsearch/reference/current/mapping-root-object-type.html#_dynamic_templates)
+
+```yaml
+fos_elastica:
+    clients:
+        default: { host: localhost, port: 9200 }
+    indexes:
+        site:
+            types:
+                user:
+                    dynamic_templates:
+                        my_template_1:
+                            match: apples_*
+                            mapping:
+                                type: float
+                        my_template_2:
+                            match: *
+                            match_mapping_type: string
+                            mapping:
+                                type: string
+                                index: not_analyzed
+                    mappings:
+                        username: { type: string }
 ```
